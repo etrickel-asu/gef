@@ -31,7 +31,7 @@
 #######################################################################################
 #
 # gef is distributed under the MIT License (MIT)
-# Copyright (c) 2013-2017 crazy rabbidz
+# Copyright (c) 2013-2018 crazy rabbidz
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -52,6 +52,8 @@
 # SOFTWARE.
 #
 #
+
+# x86 aggregate selectors
 
 from __future__ import print_function, division, absolute_import
 
@@ -363,16 +365,27 @@ class Address:
         return
 
     def __str__(self):
-        return hex(self.value)
+        value = format_address( self.value )
+        code_color = get_gef_setting("theme.address_code")
+        stack_color = get_gef_setting("theme.address_stack")
+        heap_color = get_gef_setting("theme.address_heap")
+        if self.is_in_text_segment():
+            return Color.colorify(value, attrs=code_color)
+        if self.is_in_heap_segment():
+            return Color.colorify(value, attrs=heap_color)
+        if self.is_in_stack_segment():
+            return Color.colorify(value, attrs=stack_color)
+        return value
 
     def is_in_text_segment(self):
-        return hasattr(self.info, "name") and ".text" in self.info.name
+        return (hasattr(self.info, "name") and ".text" in self.info.name) or \
+            (get_filepath() == self.section.path and self.section.is_executable())
 
     def is_in_stack_segment(self):
-        return hasattr(self.info, "name") and "[stack]" in self.info.name
+        return hasattr(self.section, "path") and "[stack]" == self.section.path
 
     def is_in_heap_segment(self):
-        return hasattr(self.info, "name") and "[heap]" in self.info.name
+        return hasattr(self.section, "path") and "[heap]" == self.section.path
 
     def dereference(self):
         addr = align_address(long(self.value))
@@ -1119,7 +1132,7 @@ def gef_instruction_n(addr, n):
 
 def gef_get_instruction_at(addr):
     """Return the full Instruction found at the specified address."""
-    insn = list(gef_disassemble(addr, 1, from_top=True))[0]
+    insn = next(gef_disassemble(addr, 1))
     return insn
 
 
@@ -1133,16 +1146,15 @@ def gef_next_instruction(addr):
     return gef_instruction_n(addr, 1)
 
 
-def gef_disassemble(addr, nb_insn, from_top=False):
-    """Disassemble `nb_insn` instructions after `addr`. If `from_top` is False (default), it will
-    also disassemble the `nb_insn` instructions before `addr`.
+def gef_disassemble(addr, nb_insn, nb_prev=0):
+    """Disassemble `nb_insn` instructions after `addr` and `nb_prev` before `addr`.
     Return an iterator of Instruction objects."""
     count = nb_insn + 1 if nb_insn & 1 else nb_insn
 
-    if not from_top:
-        start_addr = gdb_get_nth_previous_instruction_address(addr, count)
+    if nb_prev > 0:
+        start_addr = gdb_get_nth_previous_instruction_address(addr, nb_prev)
         if start_addr > 0:
-            for insn in gdb_disassemble(start_addr, count=count):
+            for insn in gdb_disassemble(start_addr, count=nb_prev):
                 if insn.address == addr: break
                 yield insn
 
@@ -1151,9 +1163,9 @@ def gef_disassemble(addr, nb_insn, from_top=False):
 
 
 def capstone_disassemble(location, nb_insn, **kwargs):
-    """Disassemble `nb_insn` instructions after `addr` using the Capstone-Engine disassembler, if available.
-    If `kwargs["from_top"]` is False (default), it will also disassemble the `nb_insn` instructions before
-    `addr`. Return an iterator of Instruction objects."""
+    """Disassemble `nb_insn` instructions after `addr` and `nb_prev` before
+    `addr` using the Capstone-Engine disassembler, if available.
+    Return an iterator of Instruction objects."""
 
     def cs_insn_to_gef_insn(cs_insn):
         sym_info = gdb_get_location_from_symbol(cs_insn.address)
@@ -1170,10 +1182,10 @@ def capstone_disassemble(location, nb_insn, **kwargs):
     offset      = location - page_start
     pc          = current_arch.pc
 
-    from_top    = kwargs.get("from_top", True)
-    if from_top in (False, "0", "false", "False"):
-        location = gdb_get_nth_previous_instruction_address(pc, nb_insn)
-        nb_insn *= 2
+    nb_prev    = int(kwargs.get("nb_prev", 0))
+    if nb_prev > 0:
+        location = gdb_get_nth_previous_instruction_address(pc, nb_prev)
+        nb_insn += nb_prev
 
     code = kwargs.get("code", read_memory(location, gef_getpagesize() - offset - 1))
     code = bytes(code)
@@ -1493,14 +1505,17 @@ class X86(Architecture):
     mode = "32"
 
     nop_insn = b"\x90"
-    all_registers = [
+    flag_register = "$eflags"
+    msr_registers = [
+        "$cs    ", "$ss    ", "$ds    ", "$es    ", "$fs    ", "$gs    ",
+    ]
+    gpr_registers = [
         "$eax   ", "$ebx   ", "$ecx   ", "$edx   ", "$esp   ", "$ebp   ", "$esi   ",
-        "$edi   ", "$eip   ", "$cs    ", "$ss    ", "$ds    ", "$es    ",
-        "$fs    ", "$gs    ", "$eflags",]
+        "$edi   ", "$eip   ", ]
+    all_registers = gpr_registers + [ flag_register, ] + msr_registers
     instruction_length = None
     return_register = "$eax"
     function_parameters = ["$esp", ]
-    flag_register = "$eflags"
     flags_table = {
         6: "zero",
         0: "carry",
@@ -1615,11 +1630,11 @@ class X86_64(X86):
     arch = "X86"
     mode = "64"
 
-    all_registers = [
+    gpr_registers = [
         "$rax   ", "$rbx   ", "$rcx   ", "$rdx   ", "$rsp   ", "$rbp   ", "$rsi   ",
         "$rdi   ", "$rip   ", "$r8    ", "$r9    ", "$r10   ", "$r11   ", "$r12   ",
-        "$r13   ", "$r14   ", "$r15   ",
-        "$cs    ", "$ss    ", "$ds    ", "$es    ", "$fs    ", "$gs    ", "$eflags",]
+        "$r13   ", "$r14   ", "$r15   ", ]
+    all_registers = gpr_registers + [ X86.flag_register, ] + X86.msr_registers
     return_register = "$rax"
     function_parameters = ["$rdi", "$rsi", "$rdx", "$rcx", "$r8", "$r9"]
 
@@ -2026,9 +2041,17 @@ def use_default_type():
     return "unsigned short"
 
 
+def use_golang_type():
+    if   is_elf32(): return "uint32"
+    elif is_elf64(): return "uint64"
+    return "uint16"
+
+
 def to_unsigned_long(v):
     """Cast a gdb.Value to unsigned long."""
-    unsigned_long_t = cached_lookup_type(use_stdtype()) or cached_lookup_type(use_default_type())
+    unsigned_long_t = cached_lookup_type(use_stdtype()) \
+                      or cached_lookup_type(use_default_type()) \
+                      or cached_lookup_type(use_golang_type())
     return long(v.cast(unsigned_long_t))
 
 
@@ -2776,7 +2799,9 @@ def safe_parse_and_eval(value):
 def dereference(addr):
     """GEF wrapper for gdb dereference function."""
     try:
-        ulong_t = cached_lookup_type(use_stdtype()) or cached_lookup_type(use_default_type())
+        ulong_t = cached_lookup_type(use_stdtype()) or \
+                  cached_lookup_type(use_default_type()) or \
+                  cached_lookup_type(use_golang_type())
         unsigned_long_type = ulong_t.pointer()
         res = gdb.Value(addr).cast(unsigned_long_type).dereference()
         # GDB does lazy fetch, so we need to force access to the value
@@ -3843,6 +3868,9 @@ class GefThemeCommand(GenericCommand):
         self.add_setting("dereference_base_address", "bold green", "Color of dereferenced address")
         self.add_setting("dereference_register_value", "bold green" , "Color of dereferenced register")
         self.add_setting("registers_register_name", "bold red", "Color of the changed register in register window")
+        self.add_setting("address_stack", "pink", "Color to use when a stack address is found")
+        self.add_setting("address_heap", "yellow", "Color to use when a heap address is found")
+        self.add_setting("address_code", "red", "Color to use when a code address is found")
         return
 
     def do_invoke(self, args):
@@ -3850,7 +3878,7 @@ class GefThemeCommand(GenericCommand):
         argc = len(args)
 
         if argc==0:
-            for item in self.settings:
+            for item in sorted(self.settings):
                 value = self.settings[item][0]
                 value = Color.colorify(value, attrs=value)
                 print("{:40s}: {:s}".format(item, value))
@@ -5344,11 +5372,9 @@ class CapstoneDisassembleCommand(GenericCommand):
             raise ImportWarning(msg)
         return
 
-
     def __init__(self):
         super(CapstoneDisassembleCommand, self).__init__(complete=gdb.COMPLETE_LOCATION)
         return
-
 
     @only_if_gdb_running
     def do_invoke(self, argv):
@@ -5359,7 +5385,6 @@ class CapstoneDisassembleCommand(GenericCommand):
             if '=' in arg:
                 key, value = arg.split('=', 1)
                 kwargs[key] = value
-                argv.remove(arg)
 
             elif location is None:
                 location = parse_address(arg)
@@ -5384,7 +5409,6 @@ class CapstoneDisassembleCommand(GenericCommand):
             print(msg)
         return
 
-
     def capstone_analyze_pc(self, insn, nb_insn):
         cs = sys.modules["capstone"]
 
@@ -5401,7 +5425,7 @@ class CapstoneDisassembleCommand(GenericCommand):
         if current_arch.is_call(insn):
             target_address = int(insn.operands[-1].split()[0], 16)
             msg = []
-            for i, new_insn in enumerate(capstone_disassemble(target_address, nb_insn, from_top=True)):
+            for i, new_insn in enumerate(capstone_disassemble(target_address, nb_insn)):
                 msg.append("   {}  {}".format (down_arrow if i==0 else " ", str(new_insn)))
             return (True, "\n".join(msg))
 
@@ -5736,9 +5760,17 @@ class DetailRegistersCommand(GenericCommand):
             if reg.type.code == gdb.TYPE_CODE_VOID:
                 continue
 
-            line = ""
-            line+= Color.colorify(regname, attrs=regname_color)
-            line+= ": "
+            if ( is_x86_64() or is_x86_32() ) and regname in current_arch.msr_registers:
+                msr = set(current_arch.msr_registers)
+                for r in set(regs) & msr:
+                    line = "{}: ".format( Color.colorify(r.strip(), attrs=regname_color) )
+                    line+= "0x{:04x}".format(get_register(r))
+                    print(line, end="  ")
+                    regs.remove(r)
+                print()
+                continue
+
+            line = "{}: ".format( Color.colorify(regname, attrs=regname_color) )
 
             if str(reg) == "<unavailable>":
                 line += Color.colorify("no value", attrs="yellow underline")
@@ -6302,7 +6334,8 @@ class ContextCommand(GenericCommand):
         self.add_setting("show_saved_ip", False, "Show saved IP and EBP even if outside of nb_lines_stack")
         self.add_setting("grow_stack_down", False, "Order of stack downward starts at largest down to stack pointer")
         self.add_setting("nb_lines_backtrace", 10, "Number of line in the backtrace pane")
-        self.add_setting("nb_lines_code", 5, "Number of instruction before and after $pc")
+        self.add_setting("nb_lines_code", 6, "Number of instruction after $pc")
+        self.add_setting("nb_lines_code_prev", 3, "Number of instruction before $pc")
         self.add_setting("ignore_registers", "", "Space-separated list of registers not to display (e.g. '$cs $ds $gs')")
         self.add_setting("clear_screen", False, "Clear the screen before printing the context")
         self.add_setting("layout", "regs stack code source memory threads trace extra", "Change the order/presence of the context sections")
@@ -6344,6 +6377,20 @@ class ContextCommand(GenericCommand):
 
         if self.get_setting("clear_screen"):
             clear_screen(redirect)
+
+        if get_gef_setting("gef.disable_color")!=True:
+            code_color = get_gef_setting("theme.dereference_code")
+            str_color = get_gef_setting("theme.dereference_string")
+            code_addr_color = get_gef_setting("theme.address_code")
+            stack_addr_color = get_gef_setting("theme.address_stack")
+            heap_addr_color = get_gef_setting("theme.address_heap")
+
+            print("[ Legend: {} | {} | {} | {} | {} ]".format( Color.colorify("Modified register", attrs="bold red"),
+                                                               Color.colorify("Code", attrs=code_addr_color),
+                                                               Color.colorify("Heap", attrs=heap_addr_color),
+                                                               Color.colorify("Stack", attrs=stack_addr_color),
+                                                               Color.colorify("String", attrs=str_color)
+            ))
 
         for section in current_layout:
             if section[0] == "-":
@@ -6459,6 +6506,7 @@ class ContextCommand(GenericCommand):
 
     def context_code(self):
         nb_insn = self.get_setting("nb_lines_code")
+        nb_insn_prev = self.get_setting("nb_lines_code_prev")
         use_capstone = self.has_setting("use_capstone") and self.get_setting("use_capstone")
         pc = current_arch.pc
 
@@ -6474,7 +6522,7 @@ class ContextCommand(GenericCommand):
         try:
             instruction_iterator = capstone_disassemble if use_capstone else gef_disassemble
 
-            for insn in instruction_iterator(pc, nb_insn, from_top=False):
+            for insn in instruction_iterator(pc, nb_insn, nb_prev=nb_insn_prev):
                 line = []
                 is_branch = False
                 is_taken  = False
@@ -6510,7 +6558,7 @@ class ContextCommand(GenericCommand):
                         # If the operand isn't an address right now we can't parse it
                         is_taken = False
                         continue
-                    for i, insn in enumerate(instruction_iterator(target, nb_insn, from_top=True)):
+                    for i, insn in enumerate(instruction_iterator(target, nb_insn)):
                         text= "   {}  {}".format (down_arrow if i==0 else " ", str(insn))
                         print(text)
                     break
@@ -6620,7 +6668,7 @@ class ContextCommand(GenericCommand):
                 items.append(m)
             else:
                 try:
-                    insn = next(gef_disassemble(pc, 1, from_top=True))
+                    insn = next(gef_disassemble(pc, 1))
                 except gdb.MemoryError:
                     break
                 items.append(Color.redify("{} {}".format(insn.mnemo, ', '.join(insn.operands))))
@@ -7149,13 +7197,13 @@ class DereferenceCommand(GenericCommand):
             deref = addr.dereference()
             if deref is None:
                 # if here, dereferencing addr has triggered a MemoryError, no need to go further
-                msg.append(format_address(addr.value))
+                msg.append(str(addr))
                 break
 
             new_addr = lookup_address(deref)
             if new_addr.valid:
                 addr = new_addr
-                msg.append(format_address(addr.value))
+                msg.append(str(addr))
                 continue
 
             # -- Otherwise try to parse the value
