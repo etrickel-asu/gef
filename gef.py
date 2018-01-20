@@ -1334,6 +1334,10 @@ class Architecture(object):
         return get_register("$pc")
 
     @property
+    def saved_ip_name(self):
+        return "pc"
+
+    @property
     def sp(self):
         return get_register("$sp")
 
@@ -1374,6 +1378,10 @@ class ARM(Architecture):
     def instruction_length(self):
         # Thumb instructions have variable-length (2 or 4-byte)
         return None if is_arm_thumb() else 4
+
+    @property
+    def saved_ip_name(self):
+        return "lr"
 
     def is_call(self, insn):
         mnemo = insn.mnemo
@@ -1422,6 +1430,9 @@ class ARM(Architecture):
         return "; ".join(insns)
 
 
+
+
+
 class AARCH64(ARM):
     arch = "ARM64"
     mode = "ARM"
@@ -1443,6 +1454,10 @@ class AARCH64(ARM):
         6: "fast"
     }
     function_parameters = ["$x0", "$x1", "$x2", "$x3"]
+
+    @property
+    def saved_ip_name(self):
+        return "x30"
 
     def is_call(self, insn):
         mnemo = insn.mnemo
@@ -1500,6 +1515,7 @@ class AARCH64(ARM):
         return taken, reason
 
 
+
 class X86(Architecture):
     arch = "X86"
     mode = "32"
@@ -1530,6 +1546,10 @@ class X86(Architecture):
         17: "virtualx86",
         21: "identification",
     }
+
+    @property
+    def saved_ip_name(self):
+        return "eip"
 
     def flag_register_to_human(self, val=None):
         reg = self.flag_register
@@ -1638,6 +1658,10 @@ class X86_64(X86):
     return_register = "$rax"
     function_parameters = ["$rdi", "$rsi", "$rdx", "$rcx", "$r8", "$r9"]
 
+    @property
+    def saved_ip_name(self):
+        return "rip"
+
     def print_call_args(self):
         regs = ["$rdi", "$rsi", "$rdx", "$rcx", "$r8", "$r9"]
         for i, reg in enumerate(regs):
@@ -1695,6 +1719,7 @@ class PowerPC(Architecture):
     }
     function_parameters = ["$i0", "$i1", "$i2", "$i3", "$i4", "$i5"]
 
+
     def flag_register_to_human(self, val=None):
         # http://www.cebix.net/downloads/bebox/pem32b.pdf (% 2.1.3)
         if not val:
@@ -1741,11 +1766,17 @@ class PowerPC(Architecture):
                  "addi 1, 1, 16",]
         return ";".join(insns)
 
+    @property
+    def saved_ip_name(self):
+        return "lr"
 
 class PowerPC64(PowerPC):
     arch = "PPC"
     mode = "PPC64"
 
+    @property
+    def saved_ip_name(self):
+        return "lr"
 
 class SPARC(Architecture):
     """ Refs:
@@ -2261,17 +2292,25 @@ def get_info_sections():
 def get_saved_ip():
     """Retrieves the saved ip using the 'info frame' command."""
 
-    lines = gdb.execute("info frame", to_string=True).splitlines()
-    if lines:
-        saved_regs = lines[-1].split()
-        saved_ip_str = saved_regs[-1]
 
-        try:
-            saved_ip = int(saved_ip_str, 16)
-            return saved_ip
-        except ValueError:
-            # ignore
-            pass
+    ptr_hex_size = current_arch.ptrsize * 2
+    # not using register name here, because different from "saved registers" name on some platforms.
+    saved_ip_value_pattern = "saved.{1,7}=.?0x[0-9a-fA-F]{1,%d}" % ptr_hex_size
+    saved_ip_location_pattern = "%s at (0x[0-9a-fA-F]{1,%d})" % (current_arch.saved_ip_name, ptr_hex_size)
+
+    lines = gdb.execute("info frame", to_string=True)
+
+    if lines and re.search(saved_ip_value_pattern, lines) and lines.find("Saved registers") > -1:
+        last_line = lines.splitlines()[-1]
+        sip_search = re.search(saved_ip_location_pattern, last_line)
+        if sip_search and len(sip_search.groups()) > 0:
+            saved_ip_str = sip_search.group(1)
+            try:
+                saved_ip = int(saved_ip_str, 16)
+                return saved_ip
+            except ValueError:
+                # ignore
+                pass
 
     return 0
 
